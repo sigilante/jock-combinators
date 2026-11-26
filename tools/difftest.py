@@ -9,9 +9,12 @@ compares the normal form, the step count and the halting status case by case.
 Usage:  python3 tools/difftest.py [N] [SEED] [FUEL]
 Env:    AVIARY  (default ~/Code/urbit/aviary)   JOCK (default ~/Code/jock)
 
-Theta is excluded: aviary treats Θ as the alias `U U`, which takes an
-extra step per unfolding, so the traces differ by design.  Theta has hand
-vectors in tests/vectors.jock.
+Theta and A are absent from Aviary's table, so the generator never
+produces them (Aviary's Θ is the alias `U U`, which takes an extra step
+per unfolding); tests/vectors.jock covers both.  Terms that grow past
+MAXSIZE leaves in Aviary are dropped and counted.  Aviary reports FUEL once
+the step count reaches the budget, so a Jock result counts as normal only
+if it is done AND finished inside the budget.
 """
 import os, random, re, subprocess, sys, tempfile
 
@@ -109,8 +112,10 @@ def main():
     text = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
     if out.returncode != 0 or not text.startswith("("):
         print("jock run failed:\n", out.stdout[-2000:], out.stderr[-2000:]); sys.exit(2)
-    got = [(decode_cord(a), b, c == 0) for (a, (b, c)) in to_list(parse_noun(text))]
-    # Jock Bool: %.y is 0
+    # Jock Bool: %.y is 0.  Aviary reports FUEL once steps reach the budget,
+    # even on a normal term, so a Jock result is NORMAL only if done AND
+    # it finished inside the budget.
+    got = [(decode_cord(a), b, c == 0 and b < fuel) for (a, (b, c)) in to_list(parse_noun(text))]
     bad = 0
     for (src, want, wsteps, wdone), (gt, gsteps, gdone) in zip(cases, got):
         if (want, wsteps, wdone) != (gt, gsteps, gdone):

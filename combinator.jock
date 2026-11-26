@@ -1,4 +1,4 @@
-// lib/combinator — combinatory logic: terms, Smullyan's birds, reduction.
+// combinator.jock — combinatory logic: terms, Smullyan's birds, reduction.
 //
 // A reusable module, not a game library.  It owns four things:
 //
@@ -31,8 +31,8 @@
 //
 // Plus bracket abstraction into S/K/I (`abstract`, `expand`).
 //
-// NAMES ARE ASCII.  Unicode string literals are unreliable through the
-// honk lane today (jock runtime.md R-50), so Θ is `Theta`, Φ is `Phi`,
+// NAMES ARE ASCII.  Unicode string literals are not yet reliable through
+// every Jock toolchain, so Θ is `Theta`, Φ is `Phi`,
 // Ψ is `Psi`, Ê is `E^`.  A front end maps names to glyphs.
 //
 // EQUALITY IS NOUN EQUALITY.  Two Exprs are the same term exactly when
@@ -79,7 +79,7 @@ func apply(h: Expr, args: List<Expr>) -> Expr {
   }
 };
 
-func spineAcc(e: Expr, acc: List<Expr>) -> Spine {
+private func spineAcc(e: Expr, acc: List<Expr>) -> Spine {
   match e {
     .app(f, a) => spineAcc(f, (a, acc)),
     _ => Spine( head: e, args: acc ),
@@ -220,7 +220,7 @@ func fireSpine(b: Bird, args: List<Expr>) -> List<Expr> {
 // parenthesised sub-template yields `group(its items)`.  A client whose
 // items are not Exprs (Combinatrix keeps holes and paren groups) gets
 // the table's rules without converting its items.
-func<T> pick(xs: List<T>, i: @) -> T {
+private func<T> pick(xs: List<T>, i: @) -> T {
   match xs {
     (h, t) => if i == 0 { h } else { pick(t, i - 1) },
     _ => crash,
@@ -341,7 +341,8 @@ func render(e: Expr, sep: String) -> String {
   }
 };
 
-// `S K (K I)`: spaced, re-parseable with any table
+// `S K (K I)`: spaced; parses back with the same table, for terms whose
+// names the parser itself produced
 func show(e: Expr) -> String { render(e, " ") };
 
 // `SK(KI)`: Dirk's notation; unambiguous only for one-letter names
@@ -497,31 +498,48 @@ func parse(tbl: List<Bird>, s: String) -> Parsed {
 // ---------------------------------------------------------------
 // Rules.
 
-private func slot(n: String) -> @ {
+// an argument variable: exactly one letter, a..j, below the arity;
+// anything else crashes, here, when the rule is made
+private func slot(n: String, arity: @) -> @ {
   match codes(n) {
-    (c, t) => c - 97,
+    (c, t) => match t {
+      (d, u) => crash,
+      _ => if c - 97 < arity { c - 97 } else { crash },
+    },
     _ => crash,
   }
 };
 
-private func toTpl(e: Expr) -> Tpl {
+private func toTpl(e: Expr, arity: @) -> Tpl {
   match e {
-    .free(n) => Tpl.arg(slot(n)),
+    .free(n) => Tpl.arg(slot(n, arity)),
     .sym(n) => Tpl.bird(n),
-    .app(f, a) => Tpl.ap(toTpl(f), toTpl(a)),
+    .app(f, a) => Tpl.ap(toTpl(f, arity), toTpl(a, arity)),
   }
 };
 
-// a rule from text:  rule("S", "Starling", 3, "a c (b c)").  The
-// right-hand side names arguments a, b, c, ... in order and may name
-// the bird itself (recursion).  A malformed rhs is a crash: rules are
-// written by programmers, not read from users.
-func rule(name: String, title: String, arity: @, rhs: String) -> Bird {
+// a rule from text, whose right-hand side may name the birds of `tbl`
+// (by their full names) and the bird itself (recursion):
+//   ruleIn(t, "X", "Example", 2, "KM a (b b)").
+// Arguments are the letters a, b, c, ... in order, each below the
+// arity.  A rule is source code, not user input, so a malformed one
+// (bad syntax, an argument out of range, a multi-letter variable)
+// CRASHES when it is made rather than answering an error.
+func ruleIn(tbl: List<Bird>, name: String, title: String, arity: @, rhs: String) -> Bird {
   let self = Bird( name: name, title: title, arity: arity, rhs: Tpl.arg(0) );
-  match parse([self], rhs) {
-    .ok(e) => Bird( name: name, title: title, arity: arity, rhs: toTpl(e) ),
+  match parse((self, tbl), rhs) {
+    .ok(e) => Bird( name: name, title: title, arity: arity, rhs: toTpl(e, arity) ),
     .bad(p) => crash,
   }
+};
+
+// a rule whose right-hand side names only the bird itself and
+// one-letter birds:  rule("S", "Starling", 3, "a c (b c)").  Parsed
+// against no table, a multi-letter name splits into letters, so use
+// `ruleIn` to name birds like KM.
+func rule(name: String, title: String, arity: @, rhs: String) -> Bird {
+  let none: List<Bird> = ~;
+  ruleIn(none, name, title, arity, rhs)
 };
 
 private func pickName(xs: List<String>, i: @) -> String {
@@ -685,7 +703,6 @@ func expand(tbl: List<Bird>, e: Expr) -> Expansion {
   }
 };
 
-// does a template name any bird
 // does a template name bird x (self-reference: recursion)
 func mentions(x: String, t: Tpl) -> Bool {
   match t {

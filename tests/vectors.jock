@@ -48,6 +48,20 @@ func joinT(xs: List<combinator.Expr>) -> String {
   }
 };
 let skt = combinator.ski();
+let sBird = match combinator.find(t, "S") { .hit(b) => b, .miss => crash };
+func joinNames(bs: List<combinator.Bird>) -> String {
+  match bs {
+    (h, r) => match r { (u, v) => h.name + " " + joinNames(r), _ => h.name },
+    _ => "",
+  }
+};
+// a parse shown with its atoms counted, to make token splits visible
+func showP(t: List<combinator.Bird>, s: String) -> String {
+  match combinator.parse(t, s) {
+    .ok(e) => combinator.show(e) + " (" + "{combinator.size(e)}" + " atoms)",
+    .bad(p) => "parse error at {p}",
+  }
+};
 [
   nfOf(t, "S K K x", 100),
   nfOf(t, "S (K S) K x y z", 100),
@@ -75,4 +89,14 @@ let skt = combinator.ski();
   combinator.show(combinator.abstract("x", combinator.ap(combinator.free("f"), combinator.free("x")))),
   combinator.tight(combinator.ap(combinator.ap(combinator.sym("S"), combinator.sym("K")), combinator.ap(combinator.sym("K"), combinator.sym("I")))),
   nfOf(t, "S K (", 10),
+  expandOf(t, "Theta"),
+  joinT(combinator.fireSpine(sBird, [combinator.ap(combinator.sym("K"), combinator.sym("I")), combinator.free("y"), combinator.free("z")])),
+  joinNames(combinator.bckw()),
+  joinNames(combinator.select(t, ["W", "Nope", "B"])),
+  showP(t, "Foo x"),
+  showP(t, "KM' x"),
+  showP(t, "K M x"),
+  showP(skt, "Ki x"),
+  combinator.describe(combinator.ruleIn(t, "X", "Example", 2, "KM a (b b)")),
+  combinator.describe(combinator.rule("X", "Example", 2, "KM a (b b)")),
 ]

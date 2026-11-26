@@ -24,3 +24,13 @@ x (y z) [4 nf]
 f
 SK(KI)
 parse error at 5
+S (K (S I)) (S I I) (S (K (S I)) (S I I))
+K I => z => y z
+B C K W
+B W
+F o o x (4 atoms)
+KM' x (2 atoms)
+K M x (3 atoms)
+K i x (3 atoms)
+X a b = KM a (b b)
+X a b = K M a (b b)
