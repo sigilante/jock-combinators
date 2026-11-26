@@ -1,0 +1,26 @@
+x [2 nf]
+x (y z) [4 nf]
+x [1 nf]
+M M [25 fuel]
+x [2 whnf]
+x (y z) [1 nf]
+x z y [1 nf]
+x y y [1 nf]
+a (b d) (c d) [1 nf]
+a (b c d) (e f g) [1 nf]
+x x [1 nf]
+f (f (f (Theta f))) [3 fuel]
+x y (S x y) z [3 nf]
+S K (K I) [0 nf]
+S K K x => K x (K x) => x
+S a b c = a c (b c)
+A = S S S
+Theta a = a (Theta a)
+S (K S) K
+S S (K I)
+S S S
+S (K (S I I)) (S (S (K S) K) (K (S I I)))
+x (y z) [4 nf]
+f
+SK(KI)
+parse error at 5

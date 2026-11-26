@@ -1,0 +1,696 @@
+// lib/combinator — combinatory logic: terms, Smullyan's birds, reduction.
+//
+// A reusable module, not a game library.  It owns four things:
+//
+//   TERMS     `Expr` is the applicative term: a named combinator, a
+//             free variable, or an application.  Application is
+//             binary and left-nested, so `S x y z` is
+//             app(app(app(S, x), y), z); `spine` and `apply` convert
+//             between that and head-plus-arguments form.
+//   BIRDS     a `Bird` is a rule `X a1 .. an = rhs`, its right-hand
+//             side a template over argument slots (`Tpl`).  `aviary()`
+//             is the whole table, transcribed from the Aviary kernel
+//             (aviary_kernel/birds.py, Smullyan/Rathman names), plus
+//             Turing's Θ as a primitive under the ASCII name `Theta`,
+//             plus A = S S S, an ABBREVIATION (arity 0: it unfolds
+//             where it stands once reduction reaches it).  A table is
+//             just a List<Bird>, so a caller can restrict it (`select`)
+//             or extend it (`rule`) without touching this file.
+//   REDUCTION `headStep` contracts the head redex (weak head);
+//             `step` contracts the leftmost-outermost redex (normal
+//             order).  `whnf`, `nf` and `trace` iterate them under a
+//             FUEL budget, and report whether they reached a normal
+//             form or ran out (`Run.done`).  Normal order finds a
+//             normal form whenever one exists (K x (M M) halts).
+//   TEXT      `show` prints with minimal parentheses; `parse` reads
+//             the same syntax back, matching bird names longest-first
+//             against a table, so `KM'` is one bird and `K i` is two
+//             tokens.  Lowercase letters (with trailing digits or
+//             primes) are free variables.  `describe` prints a rule:
+//             "S a b c = a c (b c)".
+//
+// Plus bracket abstraction into S/K/I (`abstract`, `expand`).
+//
+// NAMES ARE ASCII.  Unicode string literals are unreliable through the
+// honk lane today (jock runtime.md R-50), so Θ is `Theta`, Φ is `Phi`,
+// Ψ is `Psi`, Ê is `E^`.  A front end maps names to glyphs.
+//
+// EQUALITY IS NOUN EQUALITY.  Two Exprs are the same term exactly when
+// `===` says so; there are no binders, so there is no alpha-renaming.
+//
+// SPINE-PRESERVING CONTRACTION.  `fireSpine` contracts a redex but keeps
+// each argument as one item instead of re-associating it into the
+// result.  `S x y z` with x = (K I) gives the items [(K I), z, (y z)],
+// not [K, I, z, (y z)].  A client that treats parenthesised groups as
+// units (the Combinatrix game does: dropping a group's parens is a
+// scored step of its own) reduces with it; ordinary normal-order
+// reduction never needs it.  `unfold` is the same thing over any item
+// type, for clients whose items are not Exprs.
+//
+//     import combinator;
+//     let t = combinator.aviary();
+//     match combinator.parse(t, "S K K x") {
+//       .ok(e) => combinator.show(combinator.nf(t, e, 1000).expr),
+//       .bad(p) => "parse error",
+//     }                                   // "x"
+
+// ---------------------------------------------------------------
+// Terms.
+
+enum Expr { sym(String), free(String), app(Expr, Expr) };
+
+// a rule's right-hand side: argument slots (0-based), named birds
+// (how a recursive bird refers to itself), and application.
+enum Tpl { arg(@), bird(String), ap(Tpl, Tpl) };
+
+struct Bird { name: String, title: String, arity: @, rhs: Tpl };
+
+struct Spine { head: Expr, args: List<Expr> };
+
+func ap(f: Expr, a: Expr) -> Expr { Expr.app(f, a) };
+func sym(n: String) -> Expr { Expr.sym(n) };
+func free(n: String) -> Expr { Expr.free(n) };
+
+// head applied to args, left-nested
+func apply(h: Expr, args: List<Expr>) -> Expr {
+  match args {
+    (a, t) => apply(Expr.app(h, a), t),
+    _ => h,
+  }
+};
+
+func spineAcc(e: Expr, acc: List<Expr>) -> Spine {
+  match e {
+    .app(f, a) => spineAcc(f, (a, acc)),
+    _ => Spine( head: e, args: acc ),
+  }
+};
+
+// the head and its arguments, outermost application last
+func spine(e: Expr) -> Spine {
+  let none: List<Expr> = ~;
+  spineAcc(e, none)
+};
+
+// atoms in the term (names and variables), not applications
+func size(e: Expr) -> @ {
+  match e {
+    .app(f, a) => size(f) + size(a),
+    _ => 1,
+  }
+};
+
+// does variable x occur free in e
+func occurs(x: String, e: Expr) -> Bool {
+  match e {
+    .free(n) => n === x,
+    .sym(n) => false,
+    .app(f, a) => occurs(x, f) or occurs(x, a),
+  }
+};
+
+// ---------------------------------------------------------------
+// List helpers (private: Expr-specialised, crash on bad index).
+
+private func count(xs: List<Expr>) -> @ {
+  match xs {
+    (h, t) => 1 + count(t),
+    _ => 0,
+  }
+};
+
+private func nth(xs: List<Expr>, i: @) -> Expr {
+  match xs {
+    (h, t) => if i == 0 { h } else { nth(t, i - 1) },
+    _ => crash,
+  }
+};
+
+private func take(xs: List<Expr>, n: @) -> List<Expr> {
+  if n == 0 { let none: List<Expr> = ~; none } else {
+    match xs {
+      (h, t) => (h, take(t, n - 1)),
+      _ => xs,
+    }
+  }
+};
+
+private func drop(xs: List<Expr>, n: @) -> List<Expr> {
+  if n == 0 { xs } else {
+    match xs {
+      (h, t) => drop(t, n - 1),
+      _ => xs,
+    }
+  }
+};
+
+private func rev(xs: List<Expr>, acc: List<Expr>) -> List<Expr> {
+  match xs {
+    (h, t) => rev(t, (h, acc)),
+    _ => acc,
+  }
+};
+
+private func cat(xs: List<Expr>, ys: List<Expr>) -> List<Expr> {
+  match xs {
+    (h, t) => (h, cat(t, ys)),
+    _ => ys,
+  }
+};
+
+// ---------------------------------------------------------------
+// Tables.
+
+enum Lookup { miss, hit(Bird) };
+
+func find(tbl: List<Bird>, n: String) -> Lookup {
+  match tbl {
+    (b, t) => if b.name === n { Lookup.hit(b) } else { find(t, n) },
+    _ => Lookup.miss,
+  }
+};
+
+private func member(n: String, ns: List<String>) -> Bool {
+  match ns {
+    (h, t) => if h === n { true } else { member(n, t) },
+    _ => false,
+  }
+};
+
+// the rows of tbl named in ns, in table order
+func select(tbl: List<Bird>, ns: List<String>) -> List<Bird> {
+  match tbl {
+    (b, t) => if member(b.name, ns) { (b, select(t, ns)) } else { select(t, ns) },
+    _ => tbl,
+  }
+};
+
+// ---------------------------------------------------------------
+// Contraction.
+
+func inst(t: Tpl, args: List<Expr>) -> Expr {
+  match t {
+    .arg(i) => nth(args, i),
+    .bird(n) => Expr.sym(n),
+    .ap(f, a) => Expr.app(inst(f, args), inst(a, args)),
+  }
+};
+
+// contract b applied to exactly b.arity args
+func fire(b: Bird, args: List<Expr>) -> Expr { inst(b.rhs, args) };
+
+private func tplSpine(t: Tpl, acc: List<Expr>, args: List<Expr>) -> List<Expr> {
+  match t {
+    .ap(f, a) => tplSpine(f, (inst(a, args), acc), args),
+    _ => (inst(t, args), acc),
+  }
+};
+
+// contract b applied to exactly b.arity args, as a list of items:
+// the template's own applications are unwound, while each argument
+// (and each parenthesised sub-template) stays whole.  See the header.
+func fireSpine(b: Bird, args: List<Expr>) -> List<Expr> {
+  let none: List<Expr> = ~;
+  tplSpine(b.rhs, none, args)
+};
+
+// fireSpine over ANY item type T.  The template's own top applications
+// are unwound into the result list; an argument slot yields the
+// caller's item verbatim, a named bird yields `atom(name)`, and a
+// parenthesised sub-template yields `group(its items)`.  A client whose
+// items are not Exprs (Combinatrix keeps holes and paren groups) gets
+// the table's rules without converting its items.
+func<T> pick(xs: List<T>, i: @) -> T {
+  match xs {
+    (h, t) => if i == 0 { h } else { pick(t, i - 1) },
+    _ => crash,
+  }
+};
+
+func<T> unfoldOne(t: Tpl, args: List<T>, atom: String -> T, group: List<T> -> T) -> T {
+  match t {
+    .arg(i) => pick(args, i),
+    .bird(n) => atom(n),
+    .ap(f, a) => group(unfold(t, args, atom, group)),
+  }
+};
+
+func<T> unfoldAcc(t: Tpl, acc: List<T>, args: List<T>, atom: String -> T, group: List<T> -> T) -> List<T> {
+  match t {
+    .ap(f, a) => unfoldAcc(f, (unfoldOne(a, args, atom, group), acc), args, atom, group),
+    _ => (unfoldOne(t, args, atom, group), acc),
+  }
+};
+
+func<T> unfold(t: Tpl, args: List<T>, atom: String -> T, group: List<T> -> T) -> List<T> {
+  let none: List<T> = ~;
+  unfoldAcc(t, none, args, atom, group)
+};
+
+enum Step { stuck, next(Expr) };
+
+// one weak-head contraction: the head is a bird with enough arguments
+func headStep(tbl: List<Bird>, e: Expr) -> Step {
+  let sp = spine(e);
+  match sp.head {
+    .sym(n) => match find(tbl, n) {
+      .hit(b) => if count(sp.args) < b.arity { Step.stuck } else {
+        Step.next(apply(fire(b, take(sp.args, b.arity)), drop(sp.args, b.arity)))
+      },
+      .miss => Step.stuck,
+    },
+    _ => Step.stuck,
+  }
+};
+
+// one normal-order (leftmost-outermost) contraction
+func step(tbl: List<Bird>, e: Expr) -> Step {
+  match headStep(tbl, e) {
+    .next(e2) => Step.next(e2),
+    .stuck => {
+      let sp = spine(e);
+      let none: List<Expr> = ~;
+      argStep(tbl, sp.head, none, sp.args)
+    },
+  }
+};
+
+func argStep(tbl: List<Bird>, h: Expr, done: List<Expr>, todo: List<Expr>) -> Step {
+  match todo {
+    (a, t) => match step(tbl, a) {
+      .next(a2) => Step.next(apply(h, cat(rev(done, ~), (a2, t)))),
+      .stuck => argStep(tbl, h, (a, done), t),
+    },
+    _ => Step.stuck,
+  }
+};
+
+// ---------------------------------------------------------------
+// Running.
+
+// `done` is true when the term is in (weak head) normal form; false
+// when the fuel ran out first.  `steps` counts contractions.
+struct Run { expr: Expr, steps: @, done: Bool };
+
+private func runWith(tbl: List<Bird>, e: Expr, fuel: @, n: @, weak: Bool) -> Run {
+  let s = if weak { headStep(tbl, e) } else { step(tbl, e) };
+  match s {
+    .stuck => Run( expr: e, steps: n, done: true ),
+    .next(e2) => if n == fuel { Run( expr: e, steps: n, done: false ) }
+                 else { runWith(tbl, e2, fuel, n + 1, weak) },
+  }
+};
+
+// reduce to weak head normal form, at most `fuel` contractions
+func whnf(tbl: List<Bird>, e: Expr, fuel: @) -> Run { runWith(tbl, e, fuel, 0, true) };
+
+// reduce to normal form (normal order), at most `fuel` contractions
+func nf(tbl: List<Bird>, e: Expr, fuel: @) -> Run { runWith(tbl, e, fuel, 0, false) };
+
+private func traceAcc(tbl: List<Bird>, e: Expr, fuel: @, acc: List<Expr>) -> List<Expr> {
+  if fuel == 0 { rev(acc, ~) } else {
+    match step(tbl, e) {
+      .next(e2) => traceAcc(tbl, e2, fuel - 1, (e2, acc)),
+      .stuck => rev(acc, ~),
+    }
+  }
+};
+
+// every term from e onward under normal order, e first, at most
+// fuel contractions
+func trace(tbl: List<Bird>, e: Expr, fuel: @) -> List<Expr> {
+  traceAcc(tbl, e, fuel, [e])
+};
+
+// ---------------------------------------------------------------
+// Printing.
+
+private func showArg(e: Expr, sep: String) -> String {
+  match e {
+    .app(f, a) => "(" + render(e, sep) + ")",
+    _ => render(e, sep),
+  }
+};
+
+// minimal parentheses, atoms separated by sep
+func render(e: Expr, sep: String) -> String {
+  match e {
+    .sym(n) => n,
+    .free(n) => n,
+    .app(f, a) => render(f, sep) + sep + showArg(a, sep),
+  }
+};
+
+// `S K (K I)`: spaced, re-parseable with any table
+func show(e: Expr) -> String { render(e, " ") };
+
+// `SK(KI)`: Dirk's notation; unambiguous only for one-letter names
+func tight(e: Expr) -> String { render(e, "") };
+
+// ---------------------------------------------------------------
+// Parsing.
+
+enum Parsed { bad(@), ok(Expr) };
+
+// bytes of a String, as atoms
+private func codes(s: String) -> List<@> { s.bytes() as! List<@> };
+
+private func isLower(c: @) -> Bool { (c > 96) and (c < 123) };
+private func isDigit(c: @) -> Bool { (c > 47) and (c < 58) };
+private func isSpace(c: @) -> Bool { (c == 32) or (c == 9) or (c == 10) or (c == 13) };
+private func isCont(c: @) -> Bool { (c > 127) and (c < 192) };
+
+private func skip(cs: List<@>) -> List<@> {
+  match cs {
+    (c, t) => if isSpace(c) { skip(t) } else { cs },
+    _ => cs,
+  }
+};
+
+private func codeCount(cs: List<@>) -> @ {
+  match cs {
+    (c, t) => 1 + codeCount(t),
+    _ => 0,
+  }
+};
+
+private func isPrefix(p: List<@>, cs: List<@>) -> Bool {
+  match p {
+    (a, pt) => match cs {
+      (b, ct) => if a == b { isPrefix(pt, ct) } else { false },
+      _ => false,
+    },
+    _ => true,
+  }
+};
+
+private func dropN(cs: List<@>, n: @) -> List<@> {
+  if n == 0 { cs } else {
+    match cs {
+      (c, t) => dropN(t, n - 1),
+      _ => cs,
+    }
+  }
+};
+
+private func takeN(cs: List<@>, n: @) -> List<@> {
+  if n == 0 { let none: List<@> = ~; none } else {
+    match cs {
+      (c, t) => (c, takeN(t, n - 1)),
+      _ => cs,
+    }
+  }
+};
+
+private func str(cs: List<@>) -> String { hoon.crip(cs as! List<Byte>) };
+
+// the longest bird name in tbl that prefixes cs, as a byte count
+private func longest(tbl: List<Bird>, cs: List<@>, best: @) -> @ {
+  match tbl {
+    (b, t) => {
+      let nb = codes(b.name);
+      let k = codeCount(nb);
+      if (k > best) and isPrefix(nb, cs) { longest(t, cs, k) } else { longest(t, cs, best) }
+    },
+    _ => best,
+  }
+};
+
+// a variable: one lowercase letter, then digits and primes
+private func varLen(cs: List<@>) -> @ {
+  match cs {
+    (c, t) => if isDigit(c) or (c == 39) { 1 + varLen(t) } else { 0 },
+    _ => 0,
+  }
+};
+
+// an unknown name: one byte, plus its UTF-8 continuation bytes
+private func contLen(cs: List<@>) -> @ {
+  match cs {
+    (c, t) => if isCont(c) { 1 + contLen(t) } else { 0 },
+    _ => 0,
+  }
+};
+
+// a parse in progress: the term so far and the unread bytes
+struct Got { e: Expr, rest: List<@> };
+enum PR { fail(List<@>), got(Got) };
+
+// one atom: a name, a variable, or a parenthesised term
+func parseAtom(tbl: List<Bird>, cs: List<@>) -> PR {
+  match cs {
+    (c, t) => if c == 40 {
+      match parseSeq(tbl, skip(t)) {
+        .got(g) => match skip(g.rest) {
+          (d, u) => if d == 41 { PR.got(Got( e: g.e, rest: u )) } else { PR.fail(g.rest) },
+          _ => PR.fail(g.rest),
+        },
+        .fail(r) => PR.fail(r),
+      }
+    } else if c == 41 { PR.fail(cs) }
+    else if isLower(c) {
+      let k = 1 + varLen(t);
+      PR.got(Got( e: Expr.free(str(takeN(cs, k))), rest: dropN(cs, k) ))
+    } else {
+      let m = longest(tbl, cs, 0);
+      let k = if m == 0 { 1 + contLen(t) } else { m };
+      PR.got(Got( e: Expr.sym(str(takeN(cs, k))), rest: dropN(cs, k) ))
+    },
+    _ => PR.fail(cs),
+  }
+};
+
+// atoms applied left to right, until ')' or the end
+func parseMore(tbl: List<Bird>, acc: Expr, cs: List<@>) -> PR {
+  let cs2 = skip(cs);
+  match cs2 {
+    (c, t) => if c == 41 { PR.got(Got( e: acc, rest: cs2 )) } else {
+      match parseAtom(tbl, cs2) {
+        .got(g) => parseMore(tbl, Expr.app(acc, g.e), g.rest),
+        .fail(r) => PR.fail(r),
+      }
+    },
+    _ => PR.got(Got( e: acc, rest: cs2 )),
+  }
+};
+
+func parseSeq(tbl: List<Bird>, cs: List<@>) -> PR {
+  match parseAtom(tbl, skip(cs)) {
+    .got(g) => parseMore(tbl, g.e, g.rest),
+    .fail(r) => PR.fail(r),
+  }
+};
+
+// parse a term; `bad(n)` is the byte offset of the first error
+func parse(tbl: List<Bird>, s: String) -> Parsed {
+  let cs = codes(s);
+  let total = codeCount(cs);
+  match parseSeq(tbl, cs) {
+    .got(g) => match skip(g.rest) {
+      (c, t) => Parsed.bad(total - codeCount(g.rest)),
+      _ => Parsed.ok(g.e),
+    },
+    .fail(r) => Parsed.bad(total - codeCount(r)),
+  }
+};
+
+// ---------------------------------------------------------------
+// Rules.
+
+private func slot(n: String) -> @ {
+  match codes(n) {
+    (c, t) => c - 97,
+    _ => crash,
+  }
+};
+
+private func toTpl(e: Expr) -> Tpl {
+  match e {
+    .free(n) => Tpl.arg(slot(n)),
+    .sym(n) => Tpl.bird(n),
+    .app(f, a) => Tpl.ap(toTpl(f), toTpl(a)),
+  }
+};
+
+// a rule from text:  rule("S", "Starling", 3, "a c (b c)").  The
+// right-hand side names arguments a, b, c, ... in order and may name
+// the bird itself (recursion).  A malformed rhs is a crash: rules are
+// written by programmers, not read from users.
+func rule(name: String, title: String, arity: @, rhs: String) -> Bird {
+  let self = Bird( name: name, title: title, arity: arity, rhs: Tpl.arg(0) );
+  match parse([self], rhs) {
+    .ok(e) => Bird( name: name, title: title, arity: arity, rhs: toTpl(e) ),
+    .bad(p) => crash,
+  }
+};
+
+private func pickName(xs: List<String>, i: @) -> String {
+  match xs {
+    (h, t) => if i == 0 { h } else { pickName(t, i - 1) },
+    _ => "z{i}",
+  }
+};
+
+private func letters(i: @, n: @) -> List<Expr> {
+  let abc = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+  if i == n { let none: List<Expr> = ~; none } else { (Expr.free(pickName(abc, i)), letters(i + 1, n)) }
+};
+
+// a rule as text:  describe(S) is "S a b c = a c (b c)"
+func describe(b: Bird) -> String {
+  let vs = letters(0, b.arity);
+  show(apply(Expr.sym(b.name), vs)) + " = " + show(fire(b, vs))
+};
+
+// The whole aviary: aviary_kernel/birds.py (Smullyan/Rathman names),
+// plus Theta, plus A = S S S.  Y and Theta share a rule, `X a = a (X a)`; they differ
+// only in what they abbreviate (Curry's S/K/I term versus Turing's
+// U U), which `expand` honours.
+func aviary() -> List<Bird> {
+  [
+    rule("B", "Bluebird", 3, "a (b c)"),
+    rule("B1", "Blackbird", 4, "a (b c d)"),
+    rule("B2", "Bunting", 5, "a (b c d e)"),
+    rule("B3", "Becard", 4, "a (b (c d))"),
+    rule("C", "Cardinal", 3, "a c b"),
+    rule("C*", "Cardinal Once Removed", 4, "a b d c"),
+    rule("C**", "Cardinal Twice Removed", 5, "a b c e d"),
+    rule("D", "Dove", 4, "a b (c d)"),
+    rule("D1", "Dickcissel", 5, "a b c (d e)"),
+    rule("D2", "Dovekie", 5, "a (b c) (d e)"),
+    rule("E", "Eagle", 5, "a b (c d e)"),
+    rule("E^", "Bald Eagle", 7, "a (b c d) (e f g)"),
+    rule("F", "Finch", 3, "c b a"),
+    rule("F*", "Finch Once Removed", 4, "a d c b"),
+    rule("F**", "Finch Twice Removed", 5, "a b e d c"),
+    rule("G", "Goldfinch", 4, "a d (b c)"),
+    rule("H", "Hummingbird", 3, "a b c b"),
+    rule("I", "Identity", 1, "a"),
+    rule("I*", "Identity Once Removed", 2, "a b"),
+    rule("I**", "Identity Twice Removed", 3, "a b c"),
+    rule("J", "Jay", 4, "a b (a d c)"),
+    rule("K", "Kestrel", 2, "a"),
+    rule("Ki", "Kite", 2, "b"),
+    rule("KM", "Konstant Mocker", 2, "b b"),
+    rule("KM'", "Crossed Konstant Mocker", 2, "a a"),
+    rule("L", "Lark", 2, "a (b b)"),
+    rule("M", "Mockingbird", 1, "a a"),
+    rule("M2", "Double Mockingbird", 2, "a b (a b)"),
+    rule("O", "Owl", 2, "b (a b)"),
+    rule("Phi", "Phoenix", 4, "a (b d) (c d)"),
+    rule("Psi", "Psi Bird", 4, "a (b c) (b d)"),
+    rule("Q", "Queer Bird", 3, "b (a c)"),
+    rule("Q1", "Quixotic Bird", 3, "a (c b)"),
+    rule("Q2", "Quizzical Bird", 3, "b (c a)"),
+    rule("Q3", "Quirky Bird", 3, "c (a b)"),
+    rule("Q4", "Quacky Bird", 3, "c (b a)"),
+    rule("R", "Robin", 3, "b c a"),
+    rule("R*", "Robin Once Removed", 4, "a c d b"),
+    rule("R**", "Robin Twice Removed", 5, "a b d e c"),
+    rule("S", "Starling", 3, "a c (b c)"),
+    rule("T", "Thrush", 2, "b a"),
+    rule("U", "Turing Bird", 2, "b (a a b)"),
+    rule("V", "Vireo", 3, "c a b"),
+    rule("V*", "Vireo Once Removed", 4, "a d b c"),
+    rule("V**", "Vireo Twice Removed", 5, "a b e c d"),
+    rule("W", "Warbler", 2, "a b b"),
+    rule("W*", "Warbler Once Removed", 3, "a b c c"),
+    rule("W**", "Warbler Twice Removed", 4, "a b c d d"),
+    rule("W'", "Converse Warbler", 2, "b a a"),
+    rule("Y", "Sage Bird", 1, "a (Y a)"),
+    rule("Theta", "Turing Fixed Point", 1, "a (Theta a)"),
+    // an ABBREVIATION: arity 0, so it unfolds where it stands as soon as
+    // reduction reaches it (at the head, or as an argument under normal
+    // order), and nowhere else.
+    rule("A", "Triple Starling", 0, "S S S"),
+  ]
+};
+
+// the classic bases
+func ski() -> List<Bird> { select(aviary(), ["S", "K", "I"]) };
+func bckw() -> List<Bird> { select(aviary(), ["B", "C", "K", "W"]) };
+
+// ---------------------------------------------------------------
+// Bracket abstraction into S/K/I.
+
+// [x] e, with the K and eta optimisations: the result r satisfies
+// r x = e under S/K/I reduction, and mentions no x.
+func abstract(x: String, e: Expr) -> Expr {
+  if not occurs(x, e) { Expr.app(Expr.sym("K"), e) } else {
+    match e {
+      .free(n) => Expr.sym("I"),
+      .sym(n) => Expr.app(Expr.sym("K"), e),
+      .app(f, a) => {
+        let eta = match a {
+          .free(n) => (n === x) and not occurs(x, f),
+          _ => false,
+        };
+        if eta { f } else {
+          Expr.app(Expr.app(Expr.sym("S"), abstract(x, f)), abstract(x, a))
+        }
+      },
+    }
+  }
+};
+
+private func slotName(i: @) -> String { "_{i}" };
+
+private func slots(i: @, n: @) -> List<Expr> {
+  if i == n { let none: List<Expr> = ~; none } else { (Expr.free(slotName(i)), slots(i + 1, n)) }
+};
+
+private func absAll(i: @, e: Expr) -> Expr {
+  if i == 0 { e } else { absAll(i - 1, abstract(slotName(i - 1), e)) }
+};
+
+enum Expansion { cyclic(String), ok(Expr) };
+
+func birdSki(tbl: List<Bird>, b: Bird) -> Expansion {
+  if b.name === "Y" {
+    match parse(ski(), "S (K (S I I)) (S (S (K S) K) (K (S I I)))") {
+      .ok(e) => Expansion.ok(e),
+      .bad(p) => crash,
+    }
+  } else if b.name === "Theta" {
+    // U U, with U = [a][b] b (a a b) expanded
+    let u = absAll(2, inst(Tpl.ap(Tpl.arg(1), Tpl.ap(Tpl.ap(Tpl.arg(0), Tpl.arg(0)), Tpl.arg(1))), slots(0, 2)));
+    Expansion.ok(Expr.app(u, u))
+  } else {
+    expand(tbl, absAll(b.arity, fire(b, slots(0, b.arity))))
+  }
+};
+
+// rewrite every bird of tbl into S/K/I.  A bird whose rule refers to
+// ITSELF (recursion), other than the two fixed points above, answers
+// cyclic(name): its rule has no finite S/K/I form by abstraction.  A
+// rule that names OTHER birds (A = S S S) expands them in turn; a table
+// with mutually recursive rules would not terminate here.
+func expand(tbl: List<Bird>, e: Expr) -> Expansion {
+  match e {
+    .free(n) => Expansion.ok(e),
+    .sym(n) => if (n === "S") or (n === "K") or (n === "I") { Expansion.ok(e) } else {
+      match find(tbl, n) {
+        .hit(b) => if mentions(n, b.rhs) and not ((n === "Y") or (n === "Theta")) { Expansion.cyclic(n) }
+                   else { birdSki(tbl, b) },
+        .miss => Expansion.ok(e),
+      }
+    },
+    .app(f, a) => match expand(tbl, f) {
+      .ok(f2) => match expand(tbl, a) {
+        .ok(a2) => Expansion.ok(Expr.app(f2, a2)),
+        .cyclic(m) => Expansion.cyclic(m),
+      },
+      .cyclic(m) => Expansion.cyclic(m),
+    },
+  }
+};
+
+// does a template name any bird
+// does a template name bird x (self-reference: recursion)
+func mentions(x: String, t: Tpl) -> Bool {
+  match t {
+    .arg(i) => false,
+    .bird(n) => n === x,
+    .ap(f, a) => mentions(x, f) or mentions(x, a),
+  }
+};

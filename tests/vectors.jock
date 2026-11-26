@@ -1,0 +1,78 @@
+// tests/vectors.jock --- vectors for combinator.jock.  Each element is a
+// String; tests/vectors.expected holds the expected lines, in order.
+import combinator;
+let t = combinator.aviary();
+func nfOf(t: List<combinator.Bird>, s: String, fuel: @) -> String {
+  match combinator.parse(t, s) {
+    .ok(e) => {
+      let r = combinator.nf(t, e, fuel);
+      combinator.show(r.expr) + " [" + "{r.steps}" + (if r.done { " nf" } else { " fuel" }) + "]"
+    },
+    .bad(p) => "parse error at {p}",
+  }
+};
+func whnfOf(t: List<combinator.Bird>, s: String, fuel: @) -> String {
+  match combinator.parse(t, s) {
+    .ok(e) => {
+      let r = combinator.whnf(t, e, fuel);
+      combinator.show(r.expr) + " [" + "{r.steps}" + (if r.done { " whnf" } else { " fuel" }) + "]"
+    },
+    .bad(p) => "parse error at {p}",
+  }
+};
+func ruleOf(t: List<combinator.Bird>, n: String) -> String {
+  match combinator.find(t, n) { .hit(b) => combinator.describe(b), .miss => "no bird " + n }
+};
+func expandOf(t: List<combinator.Bird>, s: String) -> String {
+  match combinator.parse(t, s) {
+    .ok(e) => match combinator.expand(t, e) {
+      .ok(x) => combinator.show(x),
+      .cyclic(n) => "cyclic " + n,
+    },
+    .bad(p) => "parse error at {p}",
+  }
+};
+func traceOf(t: List<combinator.Bird>, s: String, fuel: @) -> String {
+  match combinator.parse(t, s) {
+    .ok(e) => joinT(combinator.trace(t, e, fuel)),
+    .bad(p) => "parse error at {p}",
+  }
+};
+func joinT(xs: List<combinator.Expr>) -> String {
+  match xs {
+    (h, r) => match r {
+      (u, v) => combinator.show(h) + " => " + joinT(r),
+      _ => combinator.show(h),
+    },
+    _ => "",
+  }
+};
+let skt = combinator.ski();
+[
+  nfOf(t, "S K K x", 100),
+  nfOf(t, "S (K S) K x y z", 100),
+  nfOf(t, "K x (M M)", 100),
+  nfOf(t, "M M", 25),
+  whnfOf(t, "K (I x) y", 100),
+  nfOf(t, "B x y z", 100),
+  nfOf(t, "C x y z", 100),
+  nfOf(t, "W x y", 100),
+  nfOf(t, "Phi a b c d", 100),
+  nfOf(t, "E^ a b c d e f g", 100),
+  nfOf(t, "KM' x y", 100),
+  nfOf(t, "Theta f", 3),
+  nfOf(t, "A x y z", 100),
+  nfOf(t, "S K (K I)", 100),
+  traceOf(t, "S K K x", 10),
+  ruleOf(t, "S"),
+  ruleOf(t, "A"),
+  ruleOf(t, "Theta"),
+  expandOf(t, "B"),
+  expandOf(t, "W"),
+  expandOf(t, "A"),
+  expandOf(t, "Y"),
+  nfOf(skt, "S (K S) K x y z", 100),
+  combinator.show(combinator.abstract("x", combinator.ap(combinator.free("f"), combinator.free("x")))),
+  combinator.tight(combinator.ap(combinator.ap(combinator.sym("S"), combinator.sym("K")), combinator.ap(combinator.sym("K"), combinator.sym("I")))),
+  nfOf(t, "S K (", 10),
+]
